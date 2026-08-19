@@ -1,0 +1,285 @@
+#!/bin/bash
+
+# omavet-scan — deterministic capability scan over installed Omarchy plugins.
+#
+# Walks $PLUGINS_DIR/*/ and, for every plugin, greps its QML/JS/shell sources
+# for capability signals. Writes ONE JSON record per plugin into $STATE_DIR.
+# Output is findings and capabilities — never a "safe" verdict. False
+# positives are the safe direction; this scanner even flags itself, because
+# it genuinely spawns processes and reads other plugins' code.
+#
+# Modes:
+#   omavet-scan                 scan every plugin, prune stale records
+#   omavet-scan <id>            scan one plugin
+#   omavet-scan --diff <id>     show git diff of unreviewed changes
+#   omavet-scan --accept <id>   mark current git HEAD reviewed, rescan
+#
+# trustScore formula (deterministic, monotone — more hits, lower score):
+#   penalty(class) = min(cap, per_hit * count)
+#     network:     12/hit, cap 30
+#     obfuscation: 15/hit, cap 30
+#     process:      4/hit, cap 15
+#     fileWrite:    3/hit, cap 10
+#     external:     3/hit, cap 15
+#   trustScore = max(0, 100 - sum(penalties))
+#
+# Only bash + jq + grep + git + coreutils — all preinstalled on Omarchy.
+
+set -u
+
+PLUGINS_DIR="${OMAVET_PLUGINS_DIR:-$HOME/.config/omarchy/plugins}"
+STATE_DIR="${OMAVET_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/omavet}"
+MAX_FINDINGS_PER_CLASS=8
+SNIPPET_MAX=120
+
+# One row per pattern: class|severity|ERE. Obfuscation appears twice: the
+# second row catches very long single lines (minified/packed payload smell).
+# ponytail: pure ERE signals, no AST — the ceiling is honest pattern matching,
+# which is why the output is capabilities, never verdicts.
+PATTERN_ROWS=(
+  'network|high|XMLHttpRequest|fetch\(|Socket|\bcurl\b|\bwget\b|https?://'
+  'process|medium|Process \{|execDetached|command:|/bin/|sh -c'
+  'fileWrite|medium|setText\(|atomicWrites|\btee\b|\brm -|>>'
+  'external|medium|\$HOME|~/\.|/etc/|/home/|\.ssh'
+  'obfuscation|high|atob\(|base64 -d|base64 --decode|\beval\b'
+  'obfuscation|high|.{500,}'
+)
+
+usage() {
+  echo "usage: omavet-scan [<plugin-id> | --diff <plugin-id> | --accept <plugin-id>]"
+}
+
+record_name() { # sanitize a plugin id into a record filename stem
+  printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+plugin_id_for_dir() {
+  local dir="$1" id=""
+  if [[ -f "$dir/manifest.json" ]]; then
+    id=$(jq -r '.id // empty' "$dir/manifest.json" 2>/dev/null)
+  fi
+  [[ -n $id ]] || id=$(basename "$dir")
+  printf '%s' "$id"
+}
+
+dir_for_id() { # resolve a plugin dir from an id (manifest id or dir name)
+  local want="$1" dir
+  for dir in "$PLUGINS_DIR"/*/; do
+    [[ -d $dir ]] || continue
+    dir="${dir%/}"
+    if [[ $(plugin_id_for_dir "$dir") == "$want" || $(basename "$dir") == "$want" ]]; then
+      printf '%s' "$dir"
+      return 0
+    fi
+  done
+  return 1
+}
+
+list_scannable_files() { # NUL-separated source files: known extensions or executable scripts
+  local dir="$1" f
+  while IFS= read -r -d '' f; do
+    case "$f" in
+      *.qml | *.js | *.mjs | *.sh) printf '%s\0' "$f" ;;
+      *) # extensionless executables count only when they start with a shebang
+        if [[ -x $f && $(head -c 2 -- "$f" 2>/dev/null) == '#!' ]]; then
+          printf '%s\0' "$f"
+        fi
+        ;;
+    esac
+  done < <(find "$dir" -name .git -prune -o -type f -print0 2>/dev/null | sort -z)
+}
+
+scan_plugin() {
+  local dir="$1"
+  local id name version author fname
+  id=$(plugin_id_for_dir "$dir")
+  fname=$(record_name "$id")
+  name=$(jq -r '.name // empty' "$dir/manifest.json" 2>/dev/null)
+  version=$(jq -r '.version // empty' "$dir/manifest.json" 2>/dev/null)
+  author=$(jq -r '.author // empty' "$dir/manifest.json" 2>/dev/null)
+  [[ -n $name ]] || name=$(basename "$dir")
+
+  local tmpdir
+  tmpdir=$(mktemp -d) || return 1
+  local findings_ndjson="$tmpdir/findings.ndjson"
+  : >"$findings_ndjson"
+
+  declare -A capcount=([network]=0 [process]=0 [fileWrite]=0 [external]=0 [obfuscation]=0)
+  declare -A findcount=([network]=0 [process]=0 [fileWrite]=0 [external]=0 [obfuscation]=0)
+
+  local file_count=0 f rel row class severity pattern c line_no snippet
+  while IFS= read -r -d '' f; do
+    file_count=$((file_count + 1))
+    rel="${f#"$dir"/}"
+    for row in "${PATTERN_ROWS[@]}"; do
+      class="${row%%|*}"
+      severity="${row#*|}"
+      severity="${severity%%|*}"
+      pattern="${row#*|*|}"
+
+      c=$(grep -cE -e "$pattern" -- "$f" 2>/dev/null) || c=0
+      [[ $c -gt 0 ]] || continue
+      capcount[$class]=$((capcount[$class] + c))
+
+      # keep the first N findings per class for the record; counts stay exact
+      while IFS= read -r hit; do
+        [[ ${findcount[$class]} -lt $MAX_FINDINGS_PER_CLASS ]] || break
+        line_no="${hit%%:*}"
+        snippet="${hit#*:}"
+        snippet=$(printf '%s' "$snippet" | tr -d '\000-\010\013\014\016-\037' | cut -c1-"$SNIPPET_MAX")
+        jq -n --arg class "$class" --arg severity "$severity" --arg file "$rel" \
+          --argjson line "$line_no" --arg snippet "$snippet" \
+          '{class:$class,severity:$severity,file:$file,line:$line,snippet:$snippet}' \
+          >>"$findings_ndjson"
+        findcount[$class]=$((findcount[$class] + 1))
+      done < <(grep -nE -e "$pattern" -- "$f" 2>/dev/null | head -n "$MAX_FINDINGS_PER_CLASS")
+    done
+  done < <(list_scannable_files "$dir")
+
+  # ---- trustScore (see formula in the header comment) ----
+  local penalty=0
+  cap_penalty() { # per-hit cap count
+    local p=$(($1 * $3))
+    ((p > $2)) && p=$2
+    echo "$p"
+  }
+  penalty=$(($(cap_penalty 12 30 "${capcount[network]}") + $(cap_penalty 15 30 "${capcount[obfuscation]}") + $(cap_penalty 4 15 "${capcount[process]}") + $(cap_penalty 3 10 "${capcount[fileWrite]}") + $(cap_penalty 3 15 "${capcount[external]}")))
+  local trust=$((100 - penalty))
+  ((trust < 0)) && trust=0
+
+  # ---- git review state ----
+  # First scan of a repo baselines the installed HEAD as reviewed; after a
+  # `git pull` HEAD moves and the record flips to unreviewed until the user
+  # accepts (omavet-scan --accept) or reviews the diff. Dirty trees are
+  # always unreviewed.
+  local is_repo=false head="" dirty=false reviewed="" unreviewed=false
+  local marker="$STATE_DIR/reviewed/$fname"
+  if git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
+    is_repo=true
+    head=$(git -C "$dir" rev-parse HEAD 2>/dev/null) || head=""
+    [[ -n $(git -C "$dir" status --porcelain 2>/dev/null) ]] && dirty=true
+    if [[ -f $marker ]]; then
+      reviewed=$(<"$marker")
+    elif [[ -n $head ]]; then
+      printf '%s' "$head" >"$marker"
+      reviewed="$head"
+    fi
+    [[ $head != "$reviewed" || $dirty == true ]] && unreviewed=true
+  fi
+
+  jq -n \
+    --arg id "$id" --arg name "$name" --arg version "$version" --arg author "$author" \
+    --arg path "$dir" --arg scannedAt "$(date -u +%FT%TZ)" \
+    --argjson fileCount "$file_count" \
+    --slurpfile findings_raw <(jq -c -s . "$findings_ndjson") \
+    --argjson network "${capcount[network]}" --argjson process "${capcount[process]}" \
+    --argjson fileWrite "${capcount[fileWrite]}" --argjson external "${capcount[external]}" \
+    --argjson obfuscation "${capcount[obfuscation]}" \
+    --argjson trustScore "$trust" \
+    --argjson repo "$is_repo" --arg head "$head" --argjson dirty "$dirty" \
+    --arg reviewedHead "$reviewed" --argjson unreviewed "$unreviewed" \
+    '{
+      id: $id, name: $name, version: $version, author: $author,
+      path: $path, scannedAt: $scannedAt, fileCount: $fileCount,
+      findings: $findings_raw[0],
+      capabilities: { network: $network, process: $process, fileWrite: $fileWrite,
+                      external: $external, obfuscation: $obfuscation },
+      trustScore: $trustScore,
+      git: { repo: $repo, head: $head, dirty: $dirty,
+             reviewedHead: $reviewedHead, unreviewed: $unreviewed }
+    }' >"$tmpdir/record.json"
+
+  mv -f "$tmpdir/record.json" "$STATE_DIR/$fname.json"
+  rm -rf "$tmpdir"
+  echo "$fname"
+}
+
+scan_all() {
+  local dir seen=""
+  shopt -s nullglob
+  for dir in "$PLUGINS_DIR"/*/; do
+    [[ -d $dir ]] || continue
+    seen+="$(scan_plugin "${dir%/}")"$'\n'
+  done
+  # prune records (and review markers) for plugins that no longer exist
+  local rec stem
+  for rec in "$STATE_DIR"/*.json; do
+    [[ -f $rec ]] || continue
+    stem=$(basename "$rec" .json)
+    if ! grep -qxF "$stem" <<<"$seen"; then
+      rm -f -- "$rec" "$STATE_DIR/reviewed/$stem"
+    fi
+  done
+}
+
+diff_plugin() {
+  local id="$1" dir marker reviewed
+  dir=$(dir_for_id "$id") || { echo "omavet-scan: no plugin matching '$id' under $PLUGINS_DIR" >&2; exit 1; }
+  if ! git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "Plugin '$id' is not a git checkout; nothing to diff."
+    exit 0
+  fi
+  marker="$STATE_DIR/reviewed/$(record_name "$(plugin_id_for_dir "$dir")")"
+  reviewed=""
+  [[ -f $marker ]] && reviewed=$(<"$marker")
+  if [[ -z $reviewed ]]; then
+    echo "No review baseline yet for '$id'; run omavet-scan first."
+    exit 0
+  fi
+  local shown=false
+  if [[ $reviewed != "$(git -C "$dir" rev-parse HEAD 2>/dev/null)" ]]; then
+    echo "== Committed changes since last review ($reviewed) =="
+    git -C "$dir" diff "$reviewed" HEAD
+    shown=true
+  fi
+  if [[ -n $(git -C "$dir" status --porcelain 2>/dev/null) ]]; then
+    echo "== Uncommitted working-tree changes =="
+    git -C "$dir" diff
+    git -C "$dir" status --short
+    shown=true
+  fi
+  [[ $shown == true ]] || echo "No unreviewed changes in '$id'."
+}
+
+accept_plugin() {
+  local id="$1" dir head
+  dir=$(dir_for_id "$id") || { echo "omavet-scan: no plugin matching '$id' under $PLUGINS_DIR" >&2; exit 1; }
+  if git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
+    head=$(git -C "$dir" rev-parse HEAD 2>/dev/null)
+    [[ -n $head ]] && printf '%s' "$head" >"$STATE_DIR/reviewed/$(record_name "$(plugin_id_for_dir "$dir")")"
+  fi
+  scan_plugin "$dir" >/dev/null
+  echo "Accepted current state of '$id'."
+}
+
+mkdir -p "$STATE_DIR/reviewed"
+
+case "${1:-}" in
+-h | --help)
+  usage
+  exit 0
+  ;;
+--diff)
+  [[ -n ${2:-} ]] || { usage >&2; exit 2; }
+  diff_plugin "$2"
+  ;;
+--accept)
+  [[ -n ${2:-} ]] || { usage >&2; exit 2; }
+  accept_plugin "$2"
+  ;;
+"")
+  if [[ ! -d $PLUGINS_DIR ]]; then
+    echo "omavet-scan: plugins directory $PLUGINS_DIR does not exist; nothing to scan."
+    exit 0
+  fi
+  scan_all >/dev/null
+  ;;
+-*)
+  usage >&2
+  exit 2
+  ;;
+*)
+  dir=$(dir_for_id "$1") || { echo "omavet-scan: no plugin matching '$1' under $PLUGINS_DIR" >&2; exit 1; }
+  scan_plugin "$dir" >/dev/null
+  ;;
+esac

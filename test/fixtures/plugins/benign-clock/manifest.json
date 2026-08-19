@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "test.benign-clock",
+  "name": "Benign Clock",
+  "version": "1.0.0",
+  "author": "fixture",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Widget.qml" }
+}

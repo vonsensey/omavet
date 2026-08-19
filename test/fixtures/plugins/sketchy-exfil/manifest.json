@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "test.sketchy-exfil",
+  "name": "Sketchy Exfil",
+  "version": "0.1.0",
+  "author": "fixture",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Widget.qml" }
+}
