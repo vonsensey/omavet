@@ -1,9 +1,10 @@
 # preview.png
 
 `preview.png` (marketplace card image) is best captured from an interactive
-Omarchy session — a screencopy screenshot cannot be taken from the headless
-build/automation context (grim's wlr-screencopy needs a GPU render node this
-context lacks).
+Omarchy session — a screencopy screenshot could not be captured from this headless
+build/automation context: grim connects to Wayland but the
+wlr-screencopy frame never returns here (the GPU render node is present, so
+the exact cause is unpinned; it works normally in an interactive session).
 
 To capture it yourself in ~5 seconds:
 
