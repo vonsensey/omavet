@@ -134,5 +134,29 @@ OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$STATE" bin/omavet-scan --ac
   || fail "--accept failed"
 assert_eq "$(jq -r .git.unreviewed "$benign")" "false" "--accept clears unreviewed"
 
+# --- hostile manifest id: no path traversal, no command execution ------------
+# Omavet inspects untrusted plugins; a manifest id is attacker-controlled.
+mkdir -p "$TMP/plugins/evil"
+cat >"$TMP/plugins/evil/manifest.json" <<'JSON'
+{"schemaVersion":1,"id":"../../pwned; touch EVIL_MARK","name":"evil","version":"1","kinds":["bar-widget"],"entryPoints":{"barWidget":"W.qml"}}
+JSON
+printf 'import QtQuick\nItem{}\n' >"$TMP/plugins/evil/W.qml"
+HSTATE="$TMP/hstate"
+( cd "$TMP" && OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$HSTATE" \
+  "$OLDPWD/bin/omavet-scan" >/dev/null 2>&1 ) || true
+OLDPWD_KEEP=$(pwd)
+OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$HSTATE" bin/omavet-scan >/dev/null 2>&1 \
+  || fail "scan crashed on a hostile manifest id"
+# every state file must stay inside the state dir (record_name sanitized the id)
+esc=$(find "$HSTATE" -type f 2>/dev/null | grep -vE "^$HSTATE/" | head -1 || true)
+[[ -z $esc ]] || fail "hostile id escaped the state dir: $esc"
+[[ ! -e "$TMP/EVIL_MARK" && ! -e ./EVIL_MARK ]] || fail "hostile id executed a command"
+PASS=$((PASS + 2))
+# --diff with a hostile id must not execute it either
+OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$HSTATE" \
+  bin/omavet-scan --diff '$(touch EVIL2); x' >/dev/null 2>&1
+[[ ! -e ./EVIL2 && ! -e "$TMP/EVIL2" ]] || fail "--diff executed a hostile id"
+PASS=$((PASS + 1))
+
 echo "OK: $PASS assertions passed"
 exit 0

@@ -61,18 +61,24 @@ Item {
     list.positionViewAtIndex(root.selectedIndex, ListView.Contain)
   }
 
+  // POSIX single-quote escape. Omavet exists to inspect UNTRUSTED plugins, so
+  // a plugin id or path is hostile input: a manifest can carry any id string,
+  // and this command is run by a shell. Wrap every interpolated value so shell
+  // metacharacters (`; | $ \` &`) can never break out of their argument.
+  function shquote(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'" }
+
   function reviewPlugin(pluginId) {
     if (!root.service || root.service.reviewCli === "" || !pluginId) return
-    // ponytail: single-quoted path survives spaces, not embedded quotes —
-    // plugin ids are already regex-limited to [A-Za-z0-9._-].
-    var cmd = "'" + root.service.pluginDir + "/bin/omavet-review' " + pluginId
+    var cmd = root.shquote(root.service.pluginDir + "/bin/omavet-review")
+      + " " + root.shquote(pluginId)
     Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation", cmd])
     root.close()
   }
 
   function diffPlugin(pluginId) {
     if (!root.service || !pluginId) return
-    var cmd = "'" + root.service.scanBin + "' --diff " + pluginId + " | less -R"
+    var cmd = root.shquote(root.service.scanBin) + " --diff "
+      + root.shquote(pluginId) + " | less -R"
     Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation", cmd])
     root.close()
   }
