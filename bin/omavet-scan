@@ -40,7 +40,7 @@ PATTERN_ROWS=(
   'network|high|XMLHttpRequest|fetch\(|Socket|\bcurl\b|\bwget\b|https?://'
   'process|medium|Process \{|execDetached|command:|/bin/|sh -c'
   'fileWrite|medium|setText\(|atomicWrites|\btee\b|\brm -|>>'
-  'external|medium|\$HOME|~/\.|/etc/|/home/|\.ssh'
+  'external|medium|\.ssh|\.gnupg|\.aws|id_rsa|/etc/|/root/'
   'obfuscation|high|atob\(|base64 -d|base64 --decode|\beval\b'
   'obfuscation|high|.{500,}'
 )
@@ -108,16 +108,22 @@ scan_plugin() {
   declare -A findcount=([network]=0 [process]=0 [fileWrite]=0 [external]=0 [obfuscation]=0)
 
   local file_count=0 f rel row class severity pattern c line_no snippet
+  local scan_src="$tmpdir/scan_src"
   while IFS= read -r -d '' f; do
     file_count=$((file_count + 1))
     rel="${f#"$dir"/}"
+    # A shebang declares an interpreter; it is not itself a capability call.
+    # Blank line 1 when it is a shebang so `#!/bin/bash` does not read as a
+    # /bin/ process spawn in every script. Line count is preserved (empty
+    # line kept) so finding line numbers stay accurate.
+    sed '1s/^#!.*$//' -- "$f" >"$scan_src" 2>/dev/null || cp -- "$f" "$scan_src"
     for row in "${PATTERN_ROWS[@]}"; do
       class="${row%%|*}"
       severity="${row#*|}"
       severity="${severity%%|*}"
       pattern="${row#*|*|}"
 
-      c=$(grep -cE -e "$pattern" -- "$f" 2>/dev/null) || c=0
+      c=$(grep -cE -e "$pattern" -- "$scan_src" 2>/dev/null) || c=0
       [[ $c -gt 0 ]] || continue
       capcount[$class]=$((capcount[$class] + c))
 
@@ -132,7 +138,7 @@ scan_plugin() {
           '{class:$class,severity:$severity,file:$file,line:$line,snippet:$snippet}' \
           >>"$findings_ndjson"
         findcount[$class]=$((findcount[$class] + 1))
-      done < <(grep -nE -e "$pattern" -- "$f" 2>/dev/null | head -n "$MAX_FINDINGS_PER_CLASS")
+      done < <(grep -nE -e "$pattern" -- "$scan_src" 2>/dev/null | head -n "$MAX_FINDINGS_PER_CLASS")
     done
   done < <(list_scannable_files "$dir")
 

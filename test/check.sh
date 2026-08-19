@@ -34,7 +34,10 @@ assert_eq "$(jq -r .capabilities.network "$benign")" 0 "benign network"
 assert_eq "$(jq -r .capabilities.obfuscation "$benign")" 0 "benign obfuscation"
 assert_eq "$(jq -r .capabilities.external "$benign")" 0 "benign external"
 assert_eq "$(jq -r .capabilities.fileWrite "$benign")" 0 "benign fileWrite"
-assert_eq "$(jq -r .capabilities.process "$benign")" 0 "benign process"
+# benign ships refresh.sh (a `#!/bin/bash` shebang script). A shebang declares
+# an interpreter; it must NOT read as a /bin/ process spawn, or every plugin
+# with a hook script would be inflated. This asserts the shebang is ignored.
+assert_eq "$(jq -r .capabilities.process "$benign")" 0 "benign process (shebang not a spawn)"
 
 assert_eq "$(jq -r .capabilities.network "$sketchy")" 3 "sketchy network"
 assert_eq "$(jq -r .capabilities.obfuscation "$sketchy")" 1 "sketchy obfuscation"
@@ -54,6 +57,16 @@ jq -e '.findings | map(select(.class == "network")) | length >= 2' "$sketchy" >/
 jq -e '.findings[0] | has("file") and has("line") and has("snippet") and has("severity")' "$sketchy" >/dev/null \
   || fail "finding record missing fields"
 jq -e '.findings | length == 0' "$benign" >/dev/null || fail "benign should have no findings"
+PASS=$((PASS + 3))
+
+# no finding anywhere may be a shebang line — proves the sanitizer, generally
+for rec in "$benign" "$sketchy"; do
+  jq -e '.findings | map(select(.snippet | startswith("#!"))) | length == 0' "$rec" >/dev/null \
+    || fail "shebang leaked into findings in $rec"
+done
+# sketchy's process finding must be a real spawn, not an interpreter line
+jq -e '.findings | any(.class == "process" and (.snippet | test("sh -c")))' "$sketchy" >/dev/null \
+  || fail "sketchy process finding should be a real spawn (sh -c)"
 PASS=$((PASS + 3))
 
 # --- record metadata ---------------------------------------------------------

