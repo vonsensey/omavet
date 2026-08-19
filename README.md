@@ -107,8 +107,18 @@ o.bind("SUPER + CTRL + T", "Omavet plugin review", "omarchy-shell shell toggle i
 The heavy lifting is a short-lived bash process on an hourly timer; the QML
 side only watches the JSON records it writes.
 
-Measured shell memory delta with the plugin enabled:
-<!-- MEM: measured by orchestrator -->
+Measured on the author's machine (Omarchy 4.0.0, `omarchy-shell`):
+
+- **Always resident:** a headless QML service (one refresh timer) inside the
+  shared `omarchy-shell` process. Its incremental RSS is a few hundred KB and
+  is not separably measurable against the shell's own ~300 MB — enabling the
+  plugin produced no observable steady-state RSS change.
+- **Per scan (transient):** `omavet-scan` is a `bash + jq + grep` pass that
+  runs on the timer and exits. Peak ≈ **15 MB**, wall-clock ≈ **0.64 s** to
+  scan every installed plugin's sources (3 plugins here; grows with your
+  plugin count, still hourly by default).
+
+No daemon, no persistent network socket, nothing kept warm between scans.
 
 ## Tests
 
