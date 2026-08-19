@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.vonsensey.omavet",
+  "name": "Omavet",
+  "version": "1.0.0",
+  "author": "vonsensey",
+  "license": "MIT",
+  "description": "Local security review for installed plugins: a deterministic capability scan (network, process, file writes, filesystem reach, obfuscation), per-plugin trust dials, and a review gate for plugin updates. Never phones home.",
+  "kinds": ["service", "bar-widget", "panel"],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml",
+    "panel": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Omavet",
+    "description": "Shield tinted by the worst trust score across installed plugins, with a badge when a plugin update is pending review. Click for per-plugin report cards.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 3600
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Rescan interval (seconds)",
+        "min": 300,
+        "max": 86400,
+        "step": 300,
+        "defaultValue": 3600
+      }
+    ]
+  }
+}
