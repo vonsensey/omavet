@@ -255,5 +255,40 @@ dup_records
 jq -e '.capabilities.network >= 1' "$payload" >/dev/null || fail "--accept on the decoy erased the payload's capabilities"
 PASS=$((PASS + 4))
 
+# --- omavet-review passes the prompt as a PROMPT, not as a directory ---------
+# claude's --add-dir is variadic (<directories...>), so an unseparated prompt is
+# swallowed as a second directory and the CLI opens with no prompt at all. Stub
+# both CLIs and inspect the argv omavet-review actually execs.
+mkdir -p "$TMP/plugins/reviewme" "$TMP/stub"
+printf '{"schemaVersion":1,"id":"review.target","name":"R","version":"1","kinds":["service"],"entryPoints":{"service":"S.qml"}}\n' \
+  >"$TMP/plugins/reviewme/manifest.json"
+printf 'import QtQuick\nItem{}\n' >"$TMP/plugins/reviewme/S.qml"
+for stub in claude codex; do
+  cat >"$TMP/stub/$stub" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$@" >"$STUB_ARGV"
+STUB
+  chmod +x "$TMP/stub/$stub"
+done
+
+STUB_ARGV="$TMP/argv.claude" PATH="$TMP/stub:$PATH" OMAVET_PLUGINS_DIR="$TMP/plugins" \
+  bin/omavet-review review.target || fail "omavet-review exited non-zero with a claude stub"
+mapfile -t argv <"$TMP/argv.claude"
+# expected shape: --add-dir <dir> -- <prompt>
+assert_eq "${argv[0]}" "--add-dir" "review: first arg is --add-dir"
+case "${argv[1]}" in
+*/reviewme) PASS=$((PASS + 1)) ;;
+*) fail "review: --add-dir got '${argv[1]}', want the plugin dir" ;;
+esac
+assert_eq "${argv[2]}" "--" "review: prompt is separated from the variadic --add-dir"
+case "${argv[3]}" in
+"Security-review the Omarchy shell plugin at "*) PASS=$((PASS + 1)) ;;
+*) fail "review: prompt not passed as its own argument (got '${argv[3]:0:40}')" ;;
+esac
+assert_eq "${#argv[@]}" 4 "review: exactly four args (no prompt split, no stray dirs)"
+# the prompt must never be parseable as a directory argument
+[[ ${argv[1]} != "${argv[3]}" ]] || fail "review: prompt passed where a directory belongs"
+PASS=$((PASS + 1))
+
 echo "OK: $PASS assertions passed"
 exit 0

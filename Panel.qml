@@ -67,19 +67,27 @@ Item {
   // metacharacters (`; | $ \` &`) can never break out of their argument.
   function shquote(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'" }
 
+  // Both actions open a normal tiled terminal via omarchy-launch-tui, not the
+  // floating presentation wrapper: that wrapper prints the Omarchy logo, floats
+  // a small centred window and appends a "done" banner, which suits a transient
+  // command but not an agent session the user reads and types into for minutes.
+  // launch-tui execs argv directly (-e "$1" "${@:2}"), so the review path passes
+  // the untrusted plugin id as its own argument with no shell to escape from.
   function reviewPlugin(pluginId) {
     if (!root.service || root.service.reviewCli === "" || !pluginId) return
-    var cmd = root.shquote(root.service.pluginDir + "/bin/omavet-review")
-      + " " + root.shquote(pluginId)
-    Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation", cmd])
+    Quickshell.execDetached(["omarchy-launch-tui", "--app-id=org.omarchy.omavet",
+      root.service.pluginDir + "/bin/omavet-review", String(pluginId)])
     root.close()
   }
 
+  // The diff needs a pager, so this one does go through a shell — every
+  // interpolated value stays shquote()d.
   function diffPlugin(pluginId) {
     if (!root.service || !pluginId) return
     var cmd = root.shquote(root.service.scanBin) + " --diff "
       + root.shquote(pluginId) + " | less -R"
-    Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation", cmd])
+    Quickshell.execDetached(["omarchy-launch-tui", "--app-id=org.omarchy.omavet",
+      "bash", "-c", cmd])
     root.close()
   }
 
