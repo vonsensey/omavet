@@ -159,9 +159,14 @@ invocation, and the full git baseline → dirty → accept flow.
 
 `docs/solutions/` holds write-ups of the non-obvious problems hit while building
 Omavet — the shell serving a stale compiled QML component, a variadic CLI flag
-silently swallowing a prompt, and why an agent auditing untrusted code has to be
-structurally read-only rather than politely asked. Each one cost real time to
-diagnose, so the diagnosis is written down.
+silently swallowing a prompt, why an agent auditing untrusted code has to be
+structurally read-only rather than politely asked, and a status monitor that
+polled for twenty minutes without ever being able to report success. Each one
+cost real time to diagnose, so the diagnosis is written down.
+
+They share a shape worth naming: nothing threw, nothing logged, and every
+surrounding check stayed green while the thing being checked was not the thing
+that was running.
 
 ## License
 
