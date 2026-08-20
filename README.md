@@ -155,6 +155,14 @@ NUL-byte evasion, record-name collisions, two plugins claiming one id), the
 per-capability findings the panel drills into, the read-only agent-review
 invocation, and the full git baseline → dirty → accept flow.
 
+## Notes from building this
+
+`docs/solutions/` holds write-ups of the non-obvious problems hit while building
+Omavet — the shell serving a stale compiled QML component, a variadic CLI flag
+silently swallowing a prompt, and why an agent auditing untrusted code has to be
+structurally read-only rather than politely asked. Each one cost real time to
+diagnose, so the diagnosis is written down.
+
 ## License
 
 MIT © 2026 vonsensey
