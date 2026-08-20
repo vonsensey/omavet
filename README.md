@@ -7,6 +7,8 @@ that malleable surface: it inventories everything under
 plugin's QML/JS/shell sources, and shows you what each one *can do* — before
 you have to trust it blindly.
 
+![Omavet report panel](preview.png)
+
 - **Bar widget** — a shield tinted by the worst trust score across all
   installed plugins (calm → accent → urgent, all theme tokens), with a badge
   dot when any plugin has a git update you haven't reviewed yet.
@@ -39,8 +41,17 @@ so its own report card is honestly mediocre. The vet does not exempt itself.
 omarchy plugin add https://github.com/vonsensey/omavet --enable --yes
 ```
 
-Then add the **Omavet** widget to your bar (Omarchy menu → bar settings), or
-summon the panel directly:
+The shield appears on your bar automatically. To reposition it, or to tune
+the rescan interval:
+
+```
+omarchy bar move io.github.vonsensey.omavet --section right
+omarchy bar set io.github.vonsensey.omavet refreshIntervalSec 7200
+```
+
+(`omarchy bar put` also places the widget if you ever remove it from the bar.)
+
+Summon the panel directly with:
 
 ```
 omarchy-shell shell toggle io.github.vonsensey.omavet
@@ -99,8 +110,10 @@ CLI, for scripting or cron:
 Add to `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("SUPER + CTRL + T", "Omavet plugin review", "omarchy-shell shell toggle io.github.vonsensey.omavet")
+o.bind("SUPER + CTRL + G", "Omavet plugin review", "omarchy-shell shell toggle io.github.vonsensey.omavet")
 ```
+
+`SUPER + CTRL + G` is unbound in stock Omarchy; pick any free chord you like.
 
 ## Footprint
 
@@ -128,7 +141,9 @@ bash test/check.sh
 
 Plain bash asserts over fixture plugins (one benign, one with obvious
 network + eval findings), plus empty/missing plugin dirs, weird filenames,
-stale-record pruning, and the full git baseline → dirty → accept flow.
+stale-record pruning, hostile manifest ids (path traversal, leading dashes,
+NUL-byte evasion, record-name collisions), and the full git
+baseline → dirty → accept flow.
 
 ## License
 
