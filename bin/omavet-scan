@@ -14,13 +14,14 @@
 #   omavet-scan --diff <id>     show git diff of unreviewed changes
 #   omavet-scan --accept <id>   mark current git HEAD reviewed, rescan
 #
-# trustScore formula (deterministic, monotone — more hits, lower score):
-#   penalty(class) = min(cap, per_hit * count)
-#     network:     12/hit, cap 30
-#     obfuscation: 15/hit, cap 30
-#     process:      4/hit, cap 15
-#     fileWrite:    3/hit, cap 10
-#     external:     3/hit, cap 15
+# trustScore formula (deterministic, monotone — more hits, lower score).
+# A hit is a matching LINE (grep -c), not each individual match:
+#   penalty(class) = min(cap, per_line * lines)
+#     network:     12/matching line, cap 30
+#     obfuscation: 15/matching line, cap 30
+#     process:      4/matching line, cap 15
+#     fileWrite:    3/matching line, cap 10
+#     external:     3/matching line, cap 15
 #   trustScore = max(0, 100 - sum(penalties))
 #
 # Only bash + jq + grep + git + coreutils — all preinstalled on Omarchy.
@@ -31,11 +32,23 @@ PLUGINS_DIR="${OMAVET_PLUGINS_DIR:-$HOME/.config/omarchy/plugins}"
 STATE_DIR="${OMAVET_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/omavet}"
 MAX_FINDINGS_PER_CLASS=8
 SNIPPET_MAX=120
+# Resource bounds: a hostile plugin must not exhaust disk/CPU on the hourly
+# automatic scan with a giant file or a bottomless tree. Honest plugin sources
+# are nowhere near these limits; oversized files are scanned truncated.
+MAX_FILE_BYTES=$((4 * 1024 * 1024))
+MAX_FILES=400
+MAX_DEPTH=8
 
 # One row per pattern: class|severity|ERE. Obfuscation appears twice: the
 # second row catches very long single lines (minified/packed payload smell).
-# ponytail: pure ERE signals, no AST — the ceiling is honest pattern matching,
+# Pure ERE signals, no AST — the ceiling is honest pattern matching,
 # which is why the output is capabilities, never verdicts.
+#
+# To anyone auditing THIS file: the strings below ("base64 -d", "eval",
+# "https://", curl, wget) are detection literals in a regex table. omavet-scan
+# never executes downloaded content and never invokes any of these — it only
+# greps other plugins' files for them. A static baseline that flags these
+# lines is flagging the scan's vocabulary, not a capability.
 PATTERN_ROWS=(
   'network|high|XMLHttpRequest|fetch\(|Socket|\bcurl\b|\bwget\b|https?://'
   'process|medium|Process \{|execDetached|command:|/bin/|sh -c'
@@ -50,7 +63,18 @@ usage() {
 }
 
 record_name() { # sanitize a plugin id into a record filename stem
-  printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+  local id="$1" stem
+  stem=$(printf '%s' "$id" | tr -c 'A-Za-z0-9._-' '_')
+  # Distinct ids can sanitize to one stem ("a/b" and "a b" → "a_b"), which
+  # would let a hostile plugin mask another plugin's record. Ids that needed
+  # sanitizing get a short hash of the real id; clean ids keep clean filenames.
+  [[ $stem == "$id" ]] || stem="$stem-$(printf '%s' "$id" | sha256sum | cut -c1-8)"
+  # A leading '-' reads as an option to any tool handed the stem, and a
+  # leading '.' would hide the record from the *.json listing. Prefix both.
+  case "$stem" in
+  -* | .*) stem="_$stem" ;;
+  esac
+  printf '%s' "$stem"
 }
 
 plugin_id_for_dir() {
@@ -76,17 +100,18 @@ dir_for_id() { # resolve a plugin dir from an id (manifest id or dir name)
 }
 
 list_scannable_files() { # NUL-separated source files: known extensions or executable scripts
-  local dir="$1" f
+  local dir="$1" f n=0
   while IFS= read -r -d '' f; do
+    [[ $n -lt $MAX_FILES ]] || break
     case "$f" in
-      *.qml | *.js | *.mjs | *.sh) printf '%s\0' "$f" ;;
+      *.qml | *.js | *.mjs | *.sh) printf '%s\0' "$f"; n=$((n + 1)) ;;
       *) # extensionless executables count only when they start with a shebang
         if [[ -x $f && $(head -c 2 -- "$f" 2>/dev/null) == '#!' ]]; then
-          printf '%s\0' "$f"
+          printf '%s\0' "$f"; n=$((n + 1))
         fi
         ;;
     esac
-  done < <(find "$dir" -name .git -prune -o -type f -print0 2>/dev/null | sort -z)
+  done < <(find "$dir" -maxdepth "$MAX_DEPTH" -name .git -prune -o -type f -print0 2>/dev/null | sort -z)
 }
 
 scan_plugin() {
@@ -115,15 +140,18 @@ scan_plugin() {
     # A shebang declares an interpreter; it is not itself a capability call.
     # Blank line 1 when it is a shebang so `#!/bin/bash` does not read as a
     # /bin/ process spawn in every script. Line count is preserved (empty
-    # line kept) so finding line numbers stay accurate.
-    sed '1s/^#!.*$//' -- "$f" >"$scan_src" 2>/dev/null || cp -- "$f" "$scan_src"
+    # line kept) so finding line numbers stay accurate. head caps the copied
+    # bytes so a hostile giant file cannot exhaust disk on every scan.
+    head -c "$MAX_FILE_BYTES" -- "$f" 2>/dev/null | sed '1s/^#!.*$//' >"$scan_src"
     for row in "${PATTERN_ROWS[@]}"; do
       class="${row%%|*}"
       severity="${row#*|}"
       severity="${severity%%|*}"
       pattern="${row#*|*|}"
 
-      c=$(grep -cE -e "$pattern" -- "$scan_src" 2>/dev/null) || c=0
+      # -a forces text mode: a single NUL byte must not let grep treat the
+      # file as binary and silently drop the evidence.
+      c=$(grep -acE -e "$pattern" -- "$scan_src" 2>/dev/null) || c=0
       [[ $c -gt 0 ]] || continue
       capcount[$class]=$((capcount[$class] + c))
 
@@ -138,13 +166,13 @@ scan_plugin() {
           '{class:$class,severity:$severity,file:$file,line:$line,snippet:$snippet}' \
           >>"$findings_ndjson"
         findcount[$class]=$((findcount[$class] + 1))
-      done < <(grep -nE -e "$pattern" -- "$scan_src" 2>/dev/null | head -n "$MAX_FINDINGS_PER_CLASS")
+      done < <(grep -anE -e "$pattern" -- "$scan_src" 2>/dev/null | head -n "$MAX_FINDINGS_PER_CLASS")
     done
   done < <(list_scannable_files "$dir")
 
   # ---- trustScore (see formula in the header comment) ----
   local penalty=0
-  cap_penalty() { # per-hit cap count
+  cap_penalty() { # per-line cap count
     local p=$(($1 * $3))
     ((p > $2)) && p=$2
     echo "$p"
@@ -173,6 +201,11 @@ scan_plugin() {
     [[ $head != "$reviewed" || $dirty == true ]] && unreviewed=true
   fi
 
+  # The record tmpfile lives INSIDE $STATE_DIR so the final mv is an atomic
+  # same-filesystem rename — the QML FileView watching the record must never
+  # see a half-written file. The dotted name stays out of the *.json listing.
+  local record_tmp
+  record_tmp=$(mktemp "$STATE_DIR/.record.XXXXXX") || { rm -rf "$tmpdir"; return 1; }
   jq -n \
     --arg id "$id" --arg name "$name" --arg version "$version" --arg author "$author" \
     --arg path "$dir" --arg scannedAt "$(date -u +%FT%TZ)" \
@@ -193,11 +226,10 @@ scan_plugin() {
       trustScore: $trustScore,
       git: { repo: $repo, head: $head, dirty: $dirty,
              reviewedHead: $reviewedHead, unreviewed: $unreviewed }
-    }' >"$tmpdir/record.json"
+    }' >"$record_tmp"
 
-  mv -f "$tmpdir/record.json" "$STATE_DIR/$fname.json"
+  mv -f "$record_tmp" "$STATE_DIR/$fname.json"
   rm -rf "$tmpdir"
-  echo "$fname"
 }
 
 scan_all() {
@@ -205,14 +237,18 @@ scan_all() {
   shopt -s nullglob
   for dir in "$PLUGINS_DIR"/*/; do
     [[ -d $dir ]] || continue
-    seen+="$(scan_plugin "${dir%/}")"$'\n'
+    dir="${dir%/}"
+    # Record the expected stem BEFORE scanning: a transient scan_plugin
+    # failure must not read as "plugin uninstalled" and prune a healthy record.
+    seen+="$(record_name "$(plugin_id_for_dir "$dir")")"$'\n'
+    scan_plugin "$dir"
   done
   # prune records (and review markers) for plugins that no longer exist
   local rec stem
   for rec in "$STATE_DIR"/*.json; do
     [[ -f $rec ]] || continue
     stem=$(basename "$rec" .json)
-    if ! grep -qxF "$stem" <<<"$seen"; then
+    if ! grep -qxF -e "$stem" <<<"$seen"; then
       rm -f -- "$rec" "$STATE_DIR/reviewed/$stem"
     fi
   done
@@ -234,8 +270,13 @@ diff_plugin() {
   fi
   local shown=false
   if [[ $reviewed != "$(git -C "$dir" rev-parse HEAD 2>/dev/null)" ]]; then
-    echo "== Committed changes since last review ($reviewed) =="
-    git -C "$dir" diff "$reviewed" HEAD
+    if git -C "$dir" cat-file -e "$reviewed^{commit}" 2>/dev/null; then
+      echo "== Committed changes since last review ($reviewed) =="
+      git -C "$dir" diff "$reviewed" HEAD
+    else
+      echo "Review baseline $reviewed no longer exists in this repo (rewritten or re-cloned history)."
+      echo "Run 'omavet-scan --accept $id' to re-baseline the current state."
+    fi
     shown=true
   fi
   if [[ -n $(git -C "$dir" status --porcelain 2>/dev/null) ]]; then
@@ -254,7 +295,7 @@ accept_plugin() {
     head=$(git -C "$dir" rev-parse HEAD 2>/dev/null)
     [[ -n $head ]] && printf '%s' "$head" >"$STATE_DIR/reviewed/$(record_name "$(plugin_id_for_dir "$dir")")"
   fi
-  scan_plugin "$dir" >/dev/null
+  scan_plugin "$dir"
   echo "Accepted current state of '$id'."
 }
 
@@ -278,7 +319,7 @@ case "${1:-}" in
     echo "omavet-scan: plugins directory $PLUGINS_DIR does not exist; nothing to scan."
     exit 0
   fi
-  scan_all >/dev/null
+  scan_all
   ;;
 -*)
   usage >&2
@@ -286,6 +327,6 @@ case "${1:-}" in
   ;;
 *)
   dir=$(dir_for_id "$1") || { echo "omavet-scan: no plugin matching '$1' under $PLUGINS_DIR" >&2; exit 1; }
-  scan_plugin "$dir" >/dev/null
+  scan_plugin "$dir"
   ;;
 esac
