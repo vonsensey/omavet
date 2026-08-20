@@ -21,9 +21,10 @@ you have to trust it blindly.
   state you last accepted, Omavet flags it. `View diff` shows exactly what
   changed; `Accept update` sets the new baseline.
 - **Agent review on demand** — the `Review with agent` button pipes the
-  plugin's code to *your own* `claude` or `codex` CLI in a floating terminal.
-  If neither is installed, Omavet says so and keeps working; the deterministic
-  scan never needs an agent.
+  plugin's code to *your own* `claude` or `codex` CLI in a floating terminal,
+  pinned to a read-only mode (`--permission-mode plan` / `--sandbox read-only`)
+  so an audit can never edit the code it is auditing. If neither is installed,
+  Omavet says so and keeps working; the deterministic scan never needs an agent.
 
 ## No verdicts, by design
 
