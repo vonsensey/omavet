@@ -207,5 +207,53 @@ jq -r .id "$STATE"/a_b*.json 2>/dev/null | grep -qxF -e 'a/b' || fail "record fo
 jq -r .id "$STATE"/a_b*.json 2>/dev/null | grep -qxF -e 'a b' || fail "record for id 'a b' masked by collision"
 PASS=$((PASS + 2))
 
+# --- duplicate manifest ids: neither plugin may hide behind the other -------
+# A hostile author ships two dirs claiming ONE id: a payload that sorts first
+# and an empty decoy that sorts last. With one record per id the decoy's clean
+# record overwrites the payload's — the capabilities vanish from the panel.
+# Both must keep their own record, and both must say so.
+mkdir -p "$TMP/plugins/aaa-payload" "$TMP/plugins/zzz-decoy"
+for d in aaa-payload zzz-decoy; do
+  cat >"$TMP/plugins/$d/manifest.json" <<'JSON'
+{"schemaVersion":1,"id":"dup.plugin","name":"Twin","version":"1","kinds":["bar-widget"],"entryPoints":{"barWidget":"W.qml"}}
+JSON
+done
+printf 'import QtQuick\nItem{ property string u: "https://evil.example/x"\n function go(){ eval(atob("ZQ==")) } }\n' \
+  >"$TMP/plugins/aaa-payload/W.qml"
+printf 'import QtQuick\nItem{}\n' >"$TMP/plugins/zzz-decoy/W.qml"
+
+dup_records() { # sets $payload / $decoy to the record file for each twin dir
+  payload=""; decoy=""
+  for f in "$STATE"/*.json; do
+    case "$(jq -r .path "$f" 2>/dev/null)" in
+    */aaa-payload) payload="$f" ;;
+    */zzz-decoy) decoy="$f" ;;
+    esac
+  done
+}
+
+OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$STATE" bin/omavet-scan || fail "duplicate-id scan exited non-zero"
+dup_records
+[[ -n $payload && -n $decoy ]] || fail "duplicate ids share one record (payload='$payload' decoy='$decoy')"
+[[ $payload != "$decoy" ]] || fail "duplicate ids resolved to the same record file"
+jq -e '.capabilities.network >= 1' "$payload" >/dev/null || fail "payload capabilities hidden by its twin"
+jq -e '.capabilities.obfuscation >= 1' "$payload" >/dev/null || fail "payload obfuscation hidden by its twin"
+assert_eq "$(jq -r .idCollision "$payload")" "zzz-decoy" "payload record names its twin"
+assert_eq "$(jq -r .idCollision "$decoy")" "aaa-payload" "decoy record names its twin"
+PASS=$((PASS + 4))
+
+# scanning one twin directly must not clobber the other's record either
+OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$STATE" bin/omavet-scan zzz-decoy || fail "single-dir twin scan failed"
+dup_records
+[[ -n $payload && -n $decoy ]] || fail "single-dir scan of the decoy clobbered the payload record"
+jq -e '.capabilities.network >= 1' "$payload" >/dev/null || fail "single-dir decoy scan erased the payload's capabilities"
+# --accept on a twin re-baselines only its own record
+OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$STATE" bin/omavet-scan --accept zzz-decoy >/dev/null \
+  || fail "--accept on a twin failed"
+dup_records
+[[ -n $payload && -n $decoy ]] || fail "--accept on the decoy clobbered the payload record"
+jq -e '.capabilities.network >= 1' "$payload" >/dev/null || fail "--accept on the decoy erased the payload's capabilities"
+PASS=$((PASS + 4))
+
 echo "OK: $PASS assertions passed"
 exit 0

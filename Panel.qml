@@ -270,6 +270,10 @@ Item {
               readonly property var rec: modelData
               readonly property bool selected: index === root.currentIndex
               readonly property bool unreviewed: rec.git && rec.git.unreviewed === true
+              // Another installed plugin directory claims this plugin's id.
+              // Honest plugins do not share ids, so this is a trust signal in
+              // its own right — it is how one plugin hides behind another.
+              readonly property string idCollision: rec.idCollision ? String(rec.idCollision) : ""
               // rec crosses the ListView model boundary as a QVariantMap, so
               // rec.findings is a QVariantList — Array.isArray is false on it.
               // Guard on length instead (QVariantList supports length/indexing).
@@ -335,7 +339,31 @@ Item {
                         font.pixelSize: Style.font.body
                         font.bold: true
                         elide: Text.ElideRight
-                        width: Math.min(implicitWidth, parent.width - (updatePill.visible ? updatePill.implicitWidth + Style.space(8) : 0))
+                        width: Math.min(implicitWidth, parent.width
+                          - (updatePill.visible ? updatePill.implicitWidth + Style.space(8) : 0)
+                          - (collisionPill.visible ? collisionPill.implicitWidth + Style.space(8) : 0))
+                      }
+
+                      Rectangle {
+                        id: collisionPill
+                        visible: row.idCollision !== ""
+                        implicitWidth: collisionPillText.implicitWidth + Style.space(12)
+                        implicitHeight: collisionPillText.implicitHeight + Style.space(4)
+                        radius: height / 2
+                        color: "transparent"
+                        border.width: 1
+                        border.color: Color.urgent
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        Text {
+                          id: collisionPillText
+                          anchors.centerIn: parent
+                          textFormat: Text.PlainText
+                          text: "duplicate id"
+                          color: Color.urgent
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                        }
                       }
 
                       Rectangle {
@@ -429,6 +457,18 @@ Item {
                 }
 
                 // ---------- expanded detail on the selected row ----------
+                Text {
+                  visible: row.selected && row.idCollision !== ""
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  text: "duplicate id: also claimed by the plugin directory " + row.idCollision
+                    + " — two installed plugins claim one id; inspect both."
+                  color: Color.urgent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
+                }
+
                 Column {
                   visible: row.selected && row.topFindings.length > 0
                   width: parent.width

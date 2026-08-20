@@ -14,7 +14,9 @@ you have to trust it blindly.
   dot when any plugin has a git update you haven't reviewed yet.
 - **Report panel** — one card per plugin: a speedometer-style trust dial,
   capability counts (network / process spawn / file writes / filesystem
-  reach / obfuscation), the top findings with file:line, and actions.
+  reach / obfuscation), the top findings with file:line, and actions. Two
+  installed plugins claiming one id get a `duplicate id` flag — neither can
+  hide behind the other's report card.
 - **Review gate for updates** — when a plugin's git checkout moves past the
   state you last accepted, Omavet flags it. `View diff` shows exactly what
   changed; `Accept update` sets the new baseline.
@@ -142,8 +144,8 @@ bash test/check.sh
 Plain bash asserts over fixture plugins (one benign, one with obvious
 network + eval findings), plus empty/missing plugin dirs, weird filenames,
 stale-record pruning, hostile manifest ids (path traversal, leading dashes,
-NUL-byte evasion, record-name collisions), and the full git
-baseline → dirty → accept flow.
+NUL-byte evasion, record-name collisions, two plugins claiming one id), and
+the full git baseline → dirty → accept flow.
 
 ## License
 

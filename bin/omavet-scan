@@ -86,6 +86,51 @@ plugin_id_for_dir() {
   printf '%s' "$id"
 }
 
+# Two installed directories can claim ONE manifest id. Honest plugins do not
+# do that, and it is a working way to hide one plugin behind another: with one
+# record per id the later-scanned directory's record silently replaces the
+# earlier one, so a payload can be masked by an empty decoy that sorts after
+# it. Never overwrite. Claims are resolved in glob order (stable, and the same
+# order dir_for_id resolves in): the first claimant keeps the clean stem, every
+# later claimant gets its own record keyed by a hash of its directory name,
+# and BOTH records name the other directory so the panel can flag the pair.
+plan_claims() { # NUL-separated (dir, stem, idCollision) triples, one per plugin
+  local dir base stem peer i
+  local -a dirs=() stems=() peers=()
+  local -A owner=()
+  shopt -s nullglob
+  for dir in "$PLUGINS_DIR"/*/; do
+    [[ -d $dir ]] || continue
+    dir="${dir%/}"
+    base=$(record_name "$(plugin_id_for_dir "$dir")")
+    stem="$base"
+    peer=""
+    if [[ -n ${owner[$base]:-} ]]; then
+      i="${owner[$base]}"
+      peer=$(basename "${dirs[$i]}")
+      [[ -n ${peers[$i]} ]] || peers[$i]=$(basename "$dir")
+      stem="$base-$(printf '%s' "$(basename "$dir")" | sha256sum | cut -c1-8)"
+    fi
+    owner[$stem]=${#dirs[@]}
+    dirs+=("$dir")
+    stems+=("$stem")
+    peers+=("$peer")
+  done
+  for ((i = 0; i < ${#dirs[@]}; i++)); do
+    printf '%s\0%s\0%s\0' "${dirs[i]}" "${stems[i]}" "${peers[i]}"
+  done
+}
+
+claim_for() { # dir -> its (stem, idCollision) pair, resolved as a full pass would
+  local want="$1" dir stem peer
+  while IFS= read -r -d '' dir && IFS= read -r -d '' stem && IFS= read -r -d '' peer; do
+    [[ $dir == "$want" ]] || continue
+    printf '%s\0%s\0' "$stem" "$peer"
+    return 0
+  done < <(plan_claims)
+  return 1
+}
+
 dir_for_id() { # resolve a plugin dir from an id (manifest id or dir name)
   local want="$1" dir
   for dir in "$PLUGINS_DIR"/*/; do
@@ -114,11 +159,15 @@ list_scannable_files() { # NUL-separated source files: known extensions or execu
   done < <(find "$dir" -maxdepth "$MAX_DEPTH" -name .git -prune -o -type f -print0 2>/dev/null | sort -z)
 }
 
-scan_plugin() {
-  local dir="$1"
-  local id name version author fname
+scan_plugin() { # dir [stem] [idCollision] — a full pass passes the resolved claim
+  local dir="$1" fname="${2:-}" collision="${3:-}"
+  local id name version author
   id=$(plugin_id_for_dir "$dir")
-  fname=$(record_name "$id")
+  if [[ -z $fname ]]; then
+    # scanned on its own: resolve this dir's claim exactly as a full pass does
+    { IFS= read -r -d '' fname && IFS= read -r -d '' collision; } < <(claim_for "$dir")
+    [[ -n $fname ]] || fname=$(record_name "$id")
+  fi
   name=$(jq -r '.name // empty' "$dir/manifest.json" 2>/dev/null)
   version=$(jq -r '.version // empty' "$dir/manifest.json" 2>/dev/null)
   author=$(jq -r '.author // empty' "$dir/manifest.json" 2>/dev/null)
@@ -209,6 +258,7 @@ scan_plugin() {
   jq -n \
     --arg id "$id" --arg name "$name" --arg version "$version" --arg author "$author" \
     --arg path "$dir" --arg scannedAt "$(date -u +%FT%TZ)" \
+    --arg idCollision "$collision" \
     --argjson fileCount "$file_count" \
     --slurpfile findings_raw <(jq -c -s . "$findings_ndjson") \
     --argjson network "${capcount[network]}" --argjson process "${capcount[process]}" \
@@ -220,6 +270,7 @@ scan_plugin() {
     '{
       id: $id, name: $name, version: $version, author: $author,
       path: $path, scannedAt: $scannedAt, fileCount: $fileCount,
+      idCollision: $idCollision,
       findings: $findings_raw[0],
       capabilities: { network: $network, process: $process, fileWrite: $fileWrite,
                       external: $external, obfuscation: $obfuscation },
@@ -233,18 +284,16 @@ scan_plugin() {
 }
 
 scan_all() {
-  local dir seen=""
+  local dir stem peer seen=""
   shopt -s nullglob
-  for dir in "$PLUGINS_DIR"/*/; do
-    [[ -d $dir ]] || continue
-    dir="${dir%/}"
+  while IFS= read -r -d '' dir && IFS= read -r -d '' stem && IFS= read -r -d '' peer; do
     # Record the expected stem BEFORE scanning: a transient scan_plugin
     # failure must not read as "plugin uninstalled" and prune a healthy record.
-    seen+="$(record_name "$(plugin_id_for_dir "$dir")")"$'\n'
-    scan_plugin "$dir"
-  done
+    seen+="$stem"$'\n'
+    scan_plugin "$dir" "$stem" "$peer"
+  done < <(plan_claims)
   # prune records (and review markers) for plugins that no longer exist
-  local rec stem
+  local rec
   for rec in "$STATE_DIR"/*.json; do
     [[ -f $rec ]] || continue
     stem=$(basename "$rec" .json)
@@ -255,13 +304,15 @@ scan_all() {
 }
 
 diff_plugin() {
-  local id="$1" dir marker reviewed
+  local id="$1" dir marker reviewed stem=""
   dir=$(dir_for_id "$id") || { echo "omavet-scan: no plugin matching '$id' under $PLUGINS_DIR" >&2; exit 1; }
   if ! git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
     echo "Plugin '$id' is not a git checkout; nothing to diff."
     exit 0
   fi
-  marker="$STATE_DIR/reviewed/$(record_name "$(plugin_id_for_dir "$dir")")"
+  { IFS= read -r -d '' stem; } < <(claim_for "$dir")
+  [[ -n $stem ]] || stem=$(record_name "$(plugin_id_for_dir "$dir")")
+  marker="$STATE_DIR/reviewed/$stem"
   reviewed=""
   [[ -f $marker ]] && reviewed=$(<"$marker")
   if [[ -z $reviewed ]]; then
@@ -289,13 +340,17 @@ diff_plugin() {
 }
 
 accept_plugin() {
-  local id="$1" dir head
+  local id="$1" dir head stem="" peer=""
   dir=$(dir_for_id "$id") || { echo "omavet-scan: no plugin matching '$id' under $PLUGINS_DIR" >&2; exit 1; }
+  # The marker belongs to THIS directory's record, which is not the clean stem
+  # when another installed plugin claims the same id.
+  { IFS= read -r -d '' stem && IFS= read -r -d '' peer; } < <(claim_for "$dir")
+  [[ -n $stem ]] || stem=$(record_name "$(plugin_id_for_dir "$dir")")
   if git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
     head=$(git -C "$dir" rev-parse HEAD 2>/dev/null)
-    [[ -n $head ]] && printf '%s' "$head" >"$STATE_DIR/reviewed/$(record_name "$(plugin_id_for_dir "$dir")")"
+    [[ -n $head ]] && printf '%s' "$head" >"$STATE_DIR/reviewed/$stem"
   fi
-  scan_plugin "$dir"
+  scan_plugin "$dir" "$stem" "$peer"
   echo "Accepted current state of '$id'."
 }
 
