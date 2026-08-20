@@ -27,7 +27,12 @@ Item {
   // dependence on the order two property changes notify in.
   property string activeClass: ""
   property string activeFor: ""
-  readonly property string filterClass: root.activeFor !== "" && root.activeFor === root.selectedKey
+  // A filter also stops applying when the class has nothing stored to list —
+  // a rescan can empty the class the user drilled into, and a filter matching
+  // nothing would otherwise blank the card instead of falling back.
+  readonly property string filterClass: root.activeFor !== ""
+    && root.activeFor === root.selectedKey
+    && root.findingsForClass(root.selectedRecord, root.activeClass).length > 0
     ? root.activeClass : ""
 
   readonly property var plugins: service ? service.plugins : []
@@ -625,7 +630,7 @@ Item {
                     textFormat: Text.PlainText
                     text: (row.rec.findings && row.rec.findings.length > row.shownFindings.length
                             ? "+ " + (row.rec.findings.length - row.shownFindings.length) + " more · " : "")
-                      + "select a signal above (or press 1–5) to list every line it found"
+                      + "select a signal above (or press 1–5) to list the lines it kept"
                     color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption

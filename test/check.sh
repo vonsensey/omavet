@@ -267,21 +267,26 @@ PASS=$((PASS + 4))
 # Selecting a chip lists that class's findings in full, so the record has to
 # hold them: capped per class (the header says "N of M"), never more than the
 # capability count they were filtered from, and every row complete.
+# Derive the cap from the scanner rather than pinning a literal, so raising it
+# does not silently stop exercising truncation.
+CAP=$(sed -n 's/^MAX_FINDINGS_PER_CLASS=\([0-9]*\)$/\1/p' bin/omavet-scan)
+[[ -n $CAP && $CAP -gt 0 ]] || fail "could not read MAX_FINDINGS_PER_CLASS"
+OVER=$((CAP + 12))
 mkdir -p "$TMP/plugins/many-net"
-for i in $(seq 1 20); do printf 'fetch("https://evil.example/%s")\n' "$i"; done \
+for i in $(seq 1 "$OVER"); do printf 'fetch("https://evil.example/%s")\n' "$i"; done \
   >"$TMP/plugins/many-net/bulk.js"
 OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$STATE" bin/omavet-scan || fail "bulk scan exited non-zero"
 many="$STATE/many-net.json"
 [[ -f $many ]] || fail "many-net record missing"
-assert_eq "$(jq -r .capabilities.network "$many")" 20 "bulk network counts every matching line"
-assert_eq "$(jq -r '[.findings[] | select(.class == "network")] | length' "$many")" 8 \
+assert_eq "$(jq -r .capabilities.network "$many")" "$OVER" "bulk network counts every matching line"
+assert_eq "$(jq -r '[.findings[] | select(.class == "network")] | length' "$many")" "$CAP" \
   "bulk network findings capped at MAX_FINDINGS_PER_CLASS"
 
 for rec in "$STATE"/*.json; do
   [[ -f $rec ]] || continue
   jq -e '.findings | all(has("class") and has("file") and has("line") and has("snippet") and has("severity"))' "$rec" >/dev/null \
     || fail "a finding is missing a field the drill-down renders: $rec"
-  jq -e '.findings | group_by(.class) | all(length <= 8)' "$rec" >/dev/null \
+  jq -e --argjson cap "$CAP" '.findings | group_by(.class) | all(length <= $cap)' "$rec" >/dev/null \
     || fail "a class kept more findings than MAX_FINDINGS_PER_CLASS: $rec"
   # the chip count is the denominator of the drill-down header; a class must
   # never list more findings than that count claims exist
@@ -359,11 +364,49 @@ mapfile -t cargv <"$TMP/argv.codex"
 assert_eq "${cargv[0]}" "--sandbox" "review: codex runs sandboxed"
 assert_eq "${cargv[1]}" "read-only" "review: codex sandbox is read-only"
 assert_eq "${cargv[2]}" "--add-dir" "review: codex gets the plugin dir"
+# assert the VALUE, not just the flag: pointing the reviewer at the wrong
+# directory would otherwise pass silently, and the agent would audit the
+# wrong plugin while every flag still looked correct.
+case "${cargv[3]}" in
+*/reviewme) PASS=$((PASS + 1)) ;;
+*) fail "review: codex --add-dir got '${cargv[3]}', want the plugin dir" ;;
+esac
 assert_eq "${#cargv[@]}" 5 "review: exactly five args (no -- separator for codex)"
 case "${cargv[4]}" in
 "Security-review the Omarchy shell plugin at "*) PASS=$((PASS + 1)) ;;
 *) fail "review: codex prompt not passed as its own argument (got '${cargv[4]:0:40}')" ;;
 esac
+
+# --- one source line is one signal, even when two pattern rows match it -----
+# `obfuscation` has two rows (eval-family and the very-long-line smell), so a
+# minified line carrying eval() matches both. Counting per row would score it
+# twice, burn the full 30-point obfuscation cap for a single line, and list two
+# byte-identical rows in the drill-down.
+mkdir -p "$TMP/plugins/dupline"
+printf '{"schemaVersion":1,"id":"dup.line","name":"D","version":"1","kinds":["service"],"entryPoints":{"service":"S.qml"}}\n' \
+  >"$TMP/plugins/dupline/manifest.json"
+{ printf 'eval(atob("x"));'; head -c 600 /dev/zero | tr '\0' 'a'; printf '\n'; } \
+  >"$TMP/plugins/dupline/S.qml"
+DSTATE="$TMP/dstate"
+OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$DSTATE" bin/omavet-scan >/dev/null 2>&1 \
+  || fail "dup-line scan exited non-zero"
+dup=$(ls "$DSTATE"/dup.line*.json 2>/dev/null | head -1)
+[[ -n $dup && -f $dup ]] || fail "dup-line record missing"
+assert_eq "$(jq -r .capabilities.obfuscation "$dup")" 1 "one line matching two rows counts once"
+assert_eq "$(jq -r '[.findings[]|select(.class=="obfuscation")]|length' "$dup")" 1 \
+  "one line matching two rows is listed once"
+# 100 - 15 (one obfuscation line), NOT 100 - 30 (the cap two hits would reach)
+assert_eq "$(jq -r .trustScore "$dup")" 85 "a single line costs one penalty, not the class cap"
+# no record anywhere may list a class more times than that class was counted
+for rec in "$STATE"/*.json "$DSTATE"/*.json; do
+  [[ -f $rec ]] || continue
+  jq -e '
+    (.capabilities // {}) as $c
+    | [.findings[]?.class] | group_by(.) | map({k: .[0], n: length})
+    | all(.n <= ($c[.k] // 0))
+  ' "$rec" >/dev/null || fail "findings outnumber the capability count in $rec"
+done
+PASS=$((PASS + 1))
 
 echo "OK: $PASS assertions passed"
 exit 0

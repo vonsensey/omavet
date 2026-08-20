@@ -15,7 +15,8 @@
 #   omavet-scan --accept <id>   mark current git HEAD reviewed, rescan
 #
 # trustScore formula (deterministic, monotone — more hits, lower score).
-# A hit is a matching LINE (grep -c), not each individual match:
+# A hit is one UNIQUE source line per class, not each individual match and
+# not each pattern row that matched it:
 #   penalty(class) = min(cap, per_line * lines)
 #     network:     12/matching line, cap 30
 #     obfuscation: 15/matching line, cap 30
@@ -30,7 +31,7 @@ set -u
 
 PLUGINS_DIR="${OMAVET_PLUGINS_DIR:-$HOME/.config/omarchy/plugins}"
 STATE_DIR="${OMAVET_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/omavet}"
-MAX_FINDINGS_PER_CLASS=8
+MAX_FINDINGS_PER_CLASS=25
 SNIPPET_MAX=120
 # Resource bounds: a hostile plugin must not exhaust disk/CPU on the hourly
 # automatic scan with a giant file or a bottomless tree. Honest plugin sources
@@ -180,6 +181,9 @@ scan_plugin() { # dir [stem] [idCollision] — a full pass passes the resolved c
 
   declare -A capcount=([network]=0 [process]=0 [fileWrite]=0 [external]=0 [obfuscation]=0)
   declare -A findcount=([network]=0 [process]=0 [fileWrite]=0 [external]=0 [obfuscation]=0)
+  # class|file|line keys already counted, so a line matched by two pattern
+  # rows of the same class is one signal, not two.
+  declare -A seenline=()
 
   local file_count=0 f rel row class severity pattern c line_no snippet
   local scan_src="$tmpdir/scan_src"
@@ -198,16 +202,22 @@ scan_plugin() { # dir [stem] [idCollision] — a full pass passes the resolved c
       severity="${severity%%|*}"
       pattern="${row#*|*|}"
 
+      # One source line is ONE signal, even when several of a class's pattern
+      # rows match it (obfuscation has two rows, so a 500-char minified line
+      # carrying an unpacker call would count twice and be listed twice). Count
+      # and emit per unique class+file+line instead of per pattern row.
+      #
       # -a forces text mode: a single NUL byte must not let grep treat the
       # file as binary and silently drop the evidence.
-      c=$(grep -acE -e "$pattern" -- "$scan_src" 2>/dev/null) || c=0
-      [[ $c -gt 0 ]] || continue
-      capcount[$class]=$((capcount[$class] + c))
-
-      # keep the first N findings per class for the record; counts stay exact
       while IFS= read -r hit; do
-        [[ ${findcount[$class]} -lt $MAX_FINDINGS_PER_CLASS ]] || break
         line_no="${hit%%:*}"
+        seen_key="$class|$rel|$line_no"
+        [[ -n ${seenline[$seen_key]:-} ]] && continue
+        seenline[$seen_key]=1
+        capcount[$class]=$((capcount[$class] + 1))
+
+        # counts stay exact; only the stored evidence is capped
+        [[ ${findcount[$class]} -lt $MAX_FINDINGS_PER_CLASS ]] || continue
         snippet="${hit#*:}"
         snippet=$(printf '%s' "$snippet" | tr -d '\000-\010\013\014\016-\037' | cut -c1-"$SNIPPET_MAX")
         jq -n --arg class "$class" --arg severity "$severity" --arg file "$rel" \
@@ -215,7 +225,7 @@ scan_plugin() { # dir [stem] [idCollision] — a full pass passes the resolved c
           '{class:$class,severity:$severity,file:$file,line:$line,snippet:$snippet}' \
           >>"$findings_ndjson"
         findcount[$class]=$((findcount[$class] + 1))
-      done < <(grep -anE -e "$pattern" -- "$scan_src" 2>/dev/null | head -n "$MAX_FINDINGS_PER_CLASS")
+      done < <(grep -anE -e "$pattern" -- "$scan_src" 2>/dev/null)
     done
   done < <(list_scannable_files "$dir")
 

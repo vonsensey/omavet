@@ -18,7 +18,7 @@ you have to trust it blindly.
   installed plugins claiming one id get a `duplicate id` flag — neither can
   hide behind the other's report card.
 - **Drill down into a signal** — click a capability icon on the selected card
-  (or press `1`–`5`) and the card lists every line behind that one signal,
+  (or press `1`–`5`) and the card lists the lines behind that one signal,
   file:line and source, instead of a top-three summary. Click or press it
   again to go back. Icons at zero have nothing to show and stay inert.
 - **Review gate for updates** — when a plugin's git checkout moves past the
@@ -95,7 +95,7 @@ freely at any time.
 | Bar shield | left-click | toggle the report panel |
 | Bar shield | middle-click | rescan now |
 | Panel | `↑`/`↓` or `j`/`k` | move selection |
-| Panel | `1`–`5` | list every finding for that capability (same key clears) |
+| Panel | `1`–`5` | list the stored findings for that capability (same key clears) |
 | Panel | `Enter` | review selected plugin with your agent CLI |
 | Panel | `d` | show git diff of unreviewed changes |
 | Panel | `a` | accept a pending update (new review baseline) |
