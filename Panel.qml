@@ -210,6 +210,7 @@ Item {
                        ? " · " + root.service.unreviewedCount + " update" + (root.service.unreviewedCount === 1 ? "" : "s") + " pending review"
                        : "")
                   : "Local capability scan of installed plugins"
+                textFormat: Text.PlainText
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -269,7 +270,16 @@ Item {
               readonly property var rec: modelData
               readonly property bool selected: index === root.currentIndex
               readonly property bool unreviewed: rec.git && rec.git.unreviewed === true
-              readonly property var topFindings: Array.isArray(rec.findings) ? rec.findings.slice(0, 3) : []
+              // rec crosses the ListView model boundary as a QVariantMap, so
+              // rec.findings is a QVariantList — Array.isArray is false on it.
+              // Guard on length instead (QVariantList supports length/indexing).
+              readonly property var topFindings: {
+                var f = rec.findings
+                if (!f || !f.length) return []
+                var out = []
+                for (var i = 0; i < Math.min(3, f.length); i++) out.push(f[i])
+                return out
+              }
 
               width: list.width
               implicitHeight: rowInner.implicitHeight + Style.space(16)
@@ -314,6 +324,11 @@ Item {
                       spacing: Style.space(8)
 
                       Text {
+                        // Record strings come from UNTRUSTED plugin manifests
+                        // and sources: PlainText everywhere they are shown, so
+                        // markup can neither spoof this report nor trigger
+                        // rich-text resource loads (e.g. a remote <img src>).
+                        textFormat: Text.PlainText
                         text: row.rec.name || row.rec.id
                         color: root.foreground
                         font.family: root.fontFamily
@@ -347,6 +362,7 @@ Item {
 
                     Text {
                       width: parent.width
+                      textFormat: Text.PlainText
                       text: (row.rec.version ? "v" + row.rec.version + " · " : "")
                         + (row.rec.author ? row.rec.author + " · " : "")
                         + Number(row.rec.fileCount || 0) + " files scanned"
@@ -375,6 +391,7 @@ Item {
                             spacing: Style.space(3)
 
                             Text {
+                              textFormat: Text.PlainText
                               text: capChip.modelData.glyph
                               color: capChip.hot
                                 ? (capChip.modelData.alarming ? Color.urgent : root.foreground)
@@ -384,6 +401,7 @@ Item {
                             }
 
                             Text {
+                              textFormat: Text.PlainText
                               text: capChip.modelData.count
                               color: capChip.hot ? root.foreground : root.track
                               font.family: root.fontFamily
@@ -422,6 +440,9 @@ Item {
                     Text {
                       required property var modelData
                       width: parent.width
+                      // finding file/snippet are raw lines of the scanned
+                      // plugin's own source — hostile by definition.
+                      textFormat: Text.PlainText
                       text: root.findingLine(modelData)
                       color: modelData.severity === "high" ? Color.urgent : root.dim
                       font.family: root.fontFamily
@@ -431,8 +452,9 @@ Item {
                   }
 
                   Text {
-                    visible: Array.isArray(row.rec.findings) && row.rec.findings.length > row.topFindings.length
-                    text: "+ " + (row.rec.findings.length - row.topFindings.length) + " more findings in the scan record"
+                    visible: !!row.rec.findings && row.rec.findings.length > row.topFindings.length
+                    textFormat: Text.PlainText
+                    text: "+ " + (row.rec.findings && row.rec.findings.length ? row.rec.findings.length - row.topFindings.length : 0) + " more findings in the scan record"
                     color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
@@ -550,6 +572,7 @@ Item {
 
     Text {
       anchors.centerIn: parent
+      textFormat: Text.PlainText
       text: dialRoot.score
       color: dialRoot.valueColor
       font.family: root.fontFamily
