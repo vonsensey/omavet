@@ -8,8 +8,8 @@ import qs.Ui
 
 // Omavet report panel: one card per installed plugin — a trust dial,
 // capability counts, top findings, and actions (agent review, update diff,
-// accept). Keyboard-first: arrows/jk move, Enter reviews, d diffs, a accepts,
-// r rescans, Esc closes.
+// accept). Keyboard-first: arrows/jk move, 1–5 drill into a capability,
+// Enter reviews, d diffs, a accepts, r rescans, Esc closes.
 Item {
   id: root
 
@@ -21,10 +21,23 @@ Item {
   property bool opened: false
   property int selectedIndex: 0
 
+  // Capability drill-down: which class the selected card lists in full, and
+  // which card it was chosen on. A filter belongs to ONE card, so instead of
+  // clearing it when the selection moves, it simply stops applying — no
+  // dependence on the order two property changes notify in.
+  property string activeClass: ""
+  property string activeFor: ""
+  readonly property string filterClass: root.activeFor !== "" && root.activeFor === root.selectedKey
+    ? root.activeClass : ""
+
   readonly property var plugins: service ? service.plugins : []
   readonly property int currentIndex: plugins.length > 0
     ? Math.max(0, Math.min(selectedIndex, plugins.length - 1)) : 0
   readonly property var selectedRecord: plugins.length > 0 ? plugins[currentIndex] : null
+  // Identity of the selected card. Two installed plugins can claim one id, so
+  // the record's directory is what makes a card unique.
+  readonly property string selectedKey: selectedRecord
+    ? String(selectedRecord.path || selectedRecord.id) : ""
 
   // Shares the [menu] surface tokens — themes that style the menu style this.
   readonly property color background: Color.menu.background
@@ -39,6 +52,7 @@ Item {
   function open(payloadJson) {
     root.opened = true
     root.selectedIndex = 0
+    root.clearFilter()
     if (root.service) root.service.rescanRecords()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
@@ -55,9 +69,18 @@ Item {
     return root.foreground
   }
 
+  // A capability filter belongs to the card it was chosen on, so a deliberate
+  // move drops it. The filterClass guard covers what this cannot: a rescan
+  // re-sorts the list under a fixed index and the selection lands elsewhere.
+  function clearFilter() {
+    root.activeClass = ""
+    root.activeFor = ""
+  }
+
   function moveSelection(delta) {
     if (root.plugins.length === 0) return
     root.selectedIndex = (root.currentIndex + delta + root.plugins.length) % root.plugins.length
+    root.clearFilter()
     list.positionViewAtIndex(root.selectedIndex, ListView.Contain)
   }
 
@@ -105,19 +128,63 @@ Item {
     if (rec && rec.git && rec.git.unreviewed) acceptPlugin(rec.id)
   }
 
+  // Chip order is also the 1–5 key order. `cls` is the finding class the chip
+  // drills into; `count` is every matching line, which is what the chip shows.
   function capEntries(rec) {
     var caps = rec && rec.capabilities ? rec.capabilities : {}
     return [
-      { glyph: "󰖟", label: "network", count: Number(caps.network || 0), alarming: true },
-      { glyph: "󰆍", label: "process", count: Number(caps.process || 0), alarming: false },
-      { glyph: "󰏫", label: "file writes", count: Number(caps.fileWrite || 0), alarming: false },
-      { glyph: "󰉋", label: "fs reach", count: Number(caps.external || 0), alarming: false },
-      { glyph: "󰈉", label: "obfuscation", count: Number(caps.obfuscation || 0), alarming: true }
+      { glyph: "󰖟", label: "network", cls: "network", count: Number(caps.network || 0), alarming: true },
+      { glyph: "󰆍", label: "process", cls: "process", count: Number(caps.process || 0), alarming: false },
+      { glyph: "󰏫", label: "file writes", cls: "fileWrite", count: Number(caps.fileWrite || 0), alarming: false },
+      { glyph: "󰉋", label: "fs reach", cls: "external", count: Number(caps.external || 0), alarming: false },
+      { glyph: "󰈉", label: "obfuscation", cls: "obfuscation", count: Number(caps.obfuscation || 0), alarming: true }
     ]
+  }
+
+  function classEntry(rec, cls) {
+    var entries = root.capEntries(rec)
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i].cls === cls) return entries[i]
+    }
+    return null
+  }
+
+  // A record crosses the ListView model boundary as a QVariantMap, so its
+  // findings are a QVariantList: no Array methods, index and length only.
+  function findingsForClass(rec, cls) {
+    var f = rec ? rec.findings : null
+    var out = []
+    if (!f || !f.length || cls === "") return out
+    for (var i = 0; i < f.length; i++) {
+      if (f[i].class === cls) out.push(f[i])
+    }
+    return out
+  }
+
+  // Activating a class expands the card, so bring it back into view. A chip
+  // at zero has nothing to list and never activates.
+  function toggleClass(cls, count) {
+    if (!cls || count <= 0) return
+    var wasActive = root.filterClass === cls
+    root.activeClass = wasActive ? "" : cls
+    root.activeFor = wasActive ? "" : root.selectedKey
+    // the card grows by the whole listing, so scroll after it has resized
+    Qt.callLater(function() { list.positionViewAtIndex(root.currentIndex, ListView.Contain) })
+  }
+
+  function toggleClassAt(index) {
+    var entries = root.capEntries(root.selectedRecord)
+    if (index < 0 || index >= entries.length) return
+    root.toggleClass(entries[index].cls, entries[index].count)
   }
 
   function findingLine(f) {
     return f.file + ":" + f.line + " · " + f.class + " · " + String(f.snippet || "").trim()
+  }
+
+  // Inside a class listing the class name is on the header line already.
+  function findingDetail(f) {
+    return f.file + ":" + f.line + " · " + String(f.snippet || "").trim()
   }
 
   PanelWindow {
@@ -171,6 +238,8 @@ Item {
           if (t === "r" || t === "R") { if (root.service) root.service.scanNow() }
           else if (t === "a" || t === "A") root.acceptSelected()
           else if (t === "d" || t === "D") root.diffSelected()
+          // 1–5 pick a capability chip in displayed order; the active one again clears
+          else if (t >= "1" && t <= "5") root.toggleClassAt(Number(t) - 1)
         }
 
         Column {
@@ -292,6 +361,10 @@ Item {
                 for (var i = 0; i < Math.min(3, f.length); i++) out.push(f[i])
                 return out
               }
+              // Default view: the worst three. With a capability chip active:
+              // every finding the scan kept for that one class.
+              readonly property var shownFindings: root.filterClass === ""
+                ? topFindings : root.findingsForClass(rec, root.filterClass)
 
               width: list.width
               implicitHeight: rowInner.implicitHeight + Style.space(16)
@@ -300,7 +373,10 @@ Item {
 
               MouseArea {
                 anchors.fill: parent
-                onClicked: root.selectedIndex = row.index
+                onClicked: {
+                  if (root.currentIndex !== row.index) root.clearFilter()
+                  root.selectedIndex = row.index
+                }
               }
 
               Column {
@@ -409,7 +485,7 @@ Item {
                     }
 
                     Row {
-                      spacing: Style.space(12)
+                      spacing: Style.space(8)
 
                       Repeater {
                         model: root.capEntries(row.rec)
@@ -418,12 +494,24 @@ Item {
                           id: capChip
                           required property var modelData
                           readonly property bool hot: modelData.count > 0
+                          // only the selected card's chips filter anything
+                          readonly property bool active: row.selected && root.filterClass === capChip.modelData.cls
 
-                          width: chipRow.implicitWidth
-                          height: chipRow.implicitHeight
+                          width: chipRow.implicitWidth + Style.space(10)
+                          height: chipRow.implicitHeight + Style.space(4)
+
+                          Rectangle {
+                            anchors.fill: parent
+                            visible: capChip.active
+                            radius: height / 2
+                            color: "transparent"
+                            border.width: 1
+                            border.color: capChip.modelData.alarming ? Color.urgent : Color.accent
+                          }
 
                           Row {
                             id: chipRow
+                            anchors.centerIn: parent
                             spacing: Style.space(3)
 
                             Text {
@@ -450,12 +538,22 @@ Item {
                             id: capHover
                             anchors.fill: parent
                             hoverEnabled: true
-                            acceptedButtons: Qt.NoButton
+                            // a chip at zero has nothing to list: it stays inert
+                            // and the click falls through to selecting the card
+                            acceptedButtons: capChip.hot ? Qt.LeftButton : Qt.NoButton
+                            onClicked: {
+                              root.selectedIndex = row.index
+                              root.toggleClass(capChip.modelData.cls, capChip.modelData.count)
+                            }
                           }
 
                           PanelToolTip {
                             visible: capHover.containsMouse
+                            // PanelToolTip's Text is AutoText: only literal
+                            // labels and numbers may ever reach it, never a
+                            // string that came out of a scanned plugin.
                             text: capChip.modelData.label + ": " + capChip.modelData.count + " signal" + (capChip.modelData.count === 1 ? "" : "s")
+                              + (capChip.hot ? " · click to list them" : "")
                             fontFamily: root.fontFamily
                           }
                         }
@@ -478,12 +576,32 @@ Item {
                 }
 
                 Column {
-                  visible: row.selected && row.topFindings.length > 0
+                  visible: row.selected && row.shownFindings.length > 0
                   width: parent.width
                   spacing: Style.space(2)
 
+                  // Which signal is being listed, and how much of it there is:
+                  // the scan keeps the first few lines per class, the chip
+                  // counts them all, so the two numbers can differ.
+                  Text {
+                    visible: root.filterClass !== ""
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    text: {
+                      var entry = root.classEntry(row.rec, root.filterClass)
+                      if (!entry) return ""
+                      return entry.label + " · showing " + row.shownFindings.length + " of "
+                        + entry.count + " line" + (entry.count === 1 ? "" : "s")
+                    }
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    elide: Text.ElideRight
+                  }
+
                   Repeater {
-                    model: row.topFindings
+                    model: row.shownFindings
 
                     Text {
                       required property var modelData
@@ -491,7 +609,9 @@ Item {
                       // finding file/snippet are raw lines of the scanned
                       // plugin's own source — hostile by definition.
                       textFormat: Text.PlainText
-                      text: root.findingLine(modelData)
+                      text: root.filterClass === ""
+                        ? root.findingLine(modelData)
+                        : root.findingDetail(modelData)
                       color: modelData.severity === "high" ? Color.urgent : root.dim
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
@@ -500,12 +620,16 @@ Item {
                   }
 
                   Text {
-                    visible: !!row.rec.findings && row.rec.findings.length > row.topFindings.length
+                    visible: root.filterClass === ""
+                    width: parent.width
                     textFormat: Text.PlainText
-                    text: "+ " + (row.rec.findings && row.rec.findings.length ? row.rec.findings.length - row.topFindings.length : 0) + " more findings in the scan record"
+                    text: (row.rec.findings && row.rec.findings.length > row.shownFindings.length
+                            ? "+ " + (row.rec.findings.length - row.shownFindings.length) + " more · " : "")
+                      + "select a signal above (or press 1–5) to list every line it found"
                     color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
+                    elide: Text.ElideRight
                   }
                 }
 
@@ -563,7 +687,7 @@ Item {
           Text {
             id: footer
             width: parent.width
-            text: "↑↓ select · ⏎ agent review · d diff · a accept · r rescan · esc close"
+            text: "↑↓ select · 1–5 list a signal · ⏎ agent review · d diff · a accept · r rescan · esc close"
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

@@ -60,6 +60,14 @@ jq -e '.findings[0] | has("file") and has("line") and has("snippet") and has("se
 jq -e '.findings | length == 0' "$benign" >/dev/null || fail "benign should have no findings"
 PASS=$((PASS + 3))
 
+# The panel's capability chips drill down by class, so a plugin with several
+# capabilities must produce findings under each of them — and only under the
+# ones its chips light up for (a lit chip with nothing to list is a dead end).
+assert_eq "$(jq -r '[.findings[].class] | unique | length' "$sketchy")" 4 "sketchy findings span 4 classes"
+jq -e '([.findings[].class] | unique) == (.capabilities | to_entries | map(select(.value > 0) | .key) | sort)' "$sketchy" >/dev/null \
+  || fail "sketchy findings do not group into exactly its non-zero capability classes"
+PASS=$((PASS + 1))
+
 # no finding anywhere may be a shebang line — proves the sanitizer, generally
 for rec in "$benign" "$sketchy"; do
   jq -e '.findings | map(select(.snippet | startswith("#!"))) | length == 0' "$rec" >/dev/null \
@@ -253,6 +261,36 @@ OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$STATE" bin/omavet-scan --ac
 dup_records
 [[ -n $payload && -n $decoy ]] || fail "--accept on the decoy clobbered the payload record"
 jq -e '.capabilities.network >= 1' "$payload" >/dev/null || fail "--accept on the decoy erased the payload's capabilities"
+PASS=$((PASS + 4))
+
+# --- per-class findings: what the capability drill-down renders --------------
+# Selecting a chip lists that class's findings in full, so the record has to
+# hold them: capped per class (the header says "N of M"), never more than the
+# capability count they were filtered from, and every row complete.
+mkdir -p "$TMP/plugins/many-net"
+for i in $(seq 1 20); do printf 'fetch("https://evil.example/%s")\n' "$i"; done \
+  >"$TMP/plugins/many-net/bulk.js"
+OMAVET_PLUGINS_DIR="$TMP/plugins" OMAVET_STATE_DIR="$STATE" bin/omavet-scan || fail "bulk scan exited non-zero"
+many="$STATE/many-net.json"
+[[ -f $many ]] || fail "many-net record missing"
+assert_eq "$(jq -r .capabilities.network "$many")" 20 "bulk network counts every matching line"
+assert_eq "$(jq -r '[.findings[] | select(.class == "network")] | length' "$many")" 8 \
+  "bulk network findings capped at MAX_FINDINGS_PER_CLASS"
+
+for rec in "$STATE"/*.json; do
+  [[ -f $rec ]] || continue
+  jq -e '.findings | all(has("class") and has("file") and has("line") and has("snippet") and has("severity"))' "$rec" >/dev/null \
+    || fail "a finding is missing a field the drill-down renders: $rec"
+  jq -e '.findings | group_by(.class) | all(length <= 8)' "$rec" >/dev/null \
+    || fail "a class kept more findings than MAX_FINDINGS_PER_CLASS: $rec"
+  # the chip count is the denominator of the drill-down header; a class must
+  # never list more findings than that count claims exist
+  jq -e '.capabilities as $caps | .findings | group_by(.class) | all(length <= $caps[.[0].class])' "$rec" >/dev/null \
+    || fail "a class lists more findings than its capability count: $rec"
+  # a chip at 0 is not selectable, so no class may hide findings behind it
+  jq -e '([.findings[].class] | unique) == (.capabilities | to_entries | map(select(.value > 0) | .key) | sort)' "$rec" >/dev/null \
+    || fail "findings and lit capability chips disagree: $rec"
+done
 PASS=$((PASS + 4))
 
 # --- omavet-review: read-only audit, prompt passed as a PROMPT ---------------
