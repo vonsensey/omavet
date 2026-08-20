@@ -27,8 +27,9 @@ you have to trust it blindly.
 - **Agent review on demand** — the `Review with agent` button pipes the
   plugin's code to *your own* `claude` or `codex` CLI in a floating terminal,
   pinned to a read-only mode (`--permission-mode plan` / `--sandbox read-only`)
-  so an audit can never edit the code it is auditing. If neither is installed,
-  Omavet says so and keeps working; the deterministic scan never needs an agent.
+  so the audit cannot edit the code it is auditing without your explicit
+  approval. If neither is installed, Omavet says so and keeps working; the
+  deterministic scan never needs an agent.
 
 ## No verdicts, by design
 
